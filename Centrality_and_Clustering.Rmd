@@ -1,0 +1,241 @@
+---
+title: "Origin/Destination Centrality and Clustering"
+output:
+    MetroTransitr::metro_html: default
+    MetroTransitr::metro_report: default
+---
+
+<style type="text/css">
+html {
+  max-width: 10.5in;
+  margin: 1.25in 0.75in;
+  font-family: "Calibri", helvetica, sans-serif;
+  font-size: 11pt;
+}
+
+body { width: 8.5in;
+       max-width: 10.5in;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(data.table)
+library(igraph)
+library(sp)
+library(RColorBrewer)
+library(leaflet)
+
+tracts_OD <- readRDS('data/tracts_flowmap.RDS')
+setDT(tracts_OD)
+tracts_OD[, weight := N]
+
+tracts <- readRDS('data/tracts.RDS')
+
+tract_graph <- graph_from_data_frame(tracts_OD[, .(orig_tracts, dest_tracts, weight)], directed = TRUE)
+tract_graph_ud <- graph_from_data_frame(tracts_OD[, .(orig_tracts, dest_tracts, weight)], directed = FALSE)
+```
+
+## Methods
+A graph is a set of nodes, or points, some of which are connected by edges. We call the set of nodes N and the set of edges E. Sometimes we assign each edge a weight, and denote the set of weights by W. We denote the graph by G = (N, E, W). A graph is directed if you can only travel in certain directions along some edges. Below is an example of an un-weighted, un-directed (travel is allowed in both directions for all edges) graph.
+
+```{r}
+g <- graph_from_literal(a-b-c-d-e-f, a-g-h-b, h-e:f:i, j)
+plot(g, layout = layout_with_fr, vertex.size = 4, vertex.label.dist = 0.5, vertex.color = 'red', plot.layout = layout_as_tree)
+```
+
+As part of the 2016 Transit Onboard Survey (TBI), transit riders reported the origin and destination addresses of their trip. We associate each of these origins and destinations to a census tract. To construct a graph from the origin-destination (OD) data, each census tract is a node, and we connect two nodes with an edge if someone reported that they made a trip between these two locations. The weight of the edge is the total number of trips made between the two locations. We consider this as both an undirected and a directed graph where the direction of an 'edge' points from the origin to the destination.
+
+## Descriptive Statistics
+### Degree
+The degree of a node is the number of edges connected to that node, and is a basic measure of connectedness. Below is a map showing tracts with higher degree in darker red. On average, tracts have degree 72.4 with median 38 degrees.
+```{r}
+tot_degrees <- degree(tract_graph, loops = TRUE, mode = 'total')
+tot_degrees <- data.table(tract = names(tot_degrees), tot_degree = tot_degrees)
+tract_deg <- merge(tracts, tot_degrees, by.x = 'GEOID10', by.y = 'tract')
+
+pal <- colorNumeric(palette = "Reds", domain = tract_deg$tot_degree)
+
+leaflet() %>% addTiles(urlTemplate = 'http://tile.stamen.com/toner-lite/{z}/{x}/{y}.png',
+                       attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>,
+                       under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>.
+                       Data by <a href="http://openstreetmap.org">OpenStreetMap</a>,
+                       under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.') %>%
+  setView(lat = 44.963, lng = -93.22, zoom = 11) %>%
+  addPolygons(data = tract_deg, fillColor = ~pal(tot_degree), fillOpacity = .7, weight = 1)
+```
+
+We can also compare to the weighted degree, defined for a node as the sum of all edge weights for edges connected to that node. The average weighted degree is 171.8 with median 62. One can think of the unweighted degree as information about the number of other tracts a given tract is connected to, and the weighted degree as the number of trips to or from a tract.
+```{r}
+wght_degrees <- strength(tract_graph, loops = TRUE, mode = 'total')
+wght_degrees <- data.table(tract = names(wght_degrees), wght_degree = wght_degrees)
+tract_deg <- merge(tracts, wght_degrees, by.x = 'GEOID10', by.y = 'tract')
+
+pal <- colorNumeric(palette = "Reds", domain = tract_deg$wght_degree)
+
+leaflet() %>% addTiles(urlTemplate = 'http://tile.stamen.com/toner-lite/{z}/{x}/{y}.png',
+                       attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>,
+                       under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>.
+                       Data by <a href="http://openstreetmap.org">OpenStreetMap</a>,
+                       under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.') %>%
+  setView(lat = 44.963, lng = -93.22, zoom = 11) %>%
+  addPolygons(data = tract_deg, fillColor = ~pal(wght_degree), fillOpacity = .7, weight = 1)
+```
+
+### Degree Distribution
+
+Below is a plot of the (empirical) cdf of the unweighted degrees. Nearly all of the tracts have degree < 200, although the maximum degree is 1312.
+```{r}
+tot_degrees[, N := .N, by = .(tot_degree)]
+tot_degrees[, pct := N/699]
+unq <- unique(tot_degrees[, .(tot_degree, pct)], by = 'tot_degree')
+unq <- unq[order(tot_degree)]
+unq[, cum_sum := cumsum(pct)]
+
+plot(unq[, tot_degree], unq[, cum_sum])
+
+#degree_dist <- degree.distribution(tract_graph, cumulative = FALSE)
+#cum_degree <- cumsum(degree_dist)
+#degs <- seq(0, 1312, by = 1)
+#plot(degs, cum_degree)
+```
+
+Here is a plot of the (empirical) cdf of the weighted degrees.
+```{r}
+setkey(wght_degrees, wght_degree)
+#Compute number of tracts per each possible weighted degree
+wght_degrees[, N := .N, by = wght_degree]
+
+#Compute percentage for each possible weighted degree
+wght_degrees[, pct := N/699]
+
+#Get unique weighted degrees
+unique_degs <- unique(wght_degrees[, .(wght_degree, pct)], by = 'wght_degree')
+
+#Find cumulaive sum = empirical cdf
+unique_degs[, cum_sum := cumsum(pct)]
+
+plot(unique_degs[, wght_degree], unique_degs[, cum_sum])
+
+```
+
+###Clustering Coefficient
+The clustering coefficient of a node measures how close a node and its neighbors are to forming a complete graph. A complete graph is a graph where all possible edges are present. The clustering coefficient is given as the proportion of edges connected to a node compared to the total number of possible edges between the node and its neighbors. Below is a map showing the clustering coefficient of the tracts.
+
+It may initially be surprising that downtown Minneapolis and St. Paul have low clustering coefficients, and many outlying areas have high clustering coefficients. However, a tract may have high degree, but tracts at the other 'ends' of the edges are not themselves connected leading to a low clustering coefficient. This may help explain the phenomenon of the low clustering coefficient of downtown Minneapolis, downtown St. Paul and the airport/Mall of America. This may mean that Minneapolis, St. Paul and the airport are well-connected, but the outlying areas are not connected to one-another.
+```{r}
+clust_coeff <- transitivity(tract_graph, type = 'local')
+clust_coeff <- data.table(tract = names(V(tract_graph)), clust_coeff = clust_coeff)
+
+tract_cc <- merge(tracts, clust_coeff, by.x = 'GEOID10', by.y = 'tract')
+
+pal <- colorNumeric(palette = 'Reds', domain = tract_cc$clust_coeff)
+
+leaflet() %>% addTiles(urlTemplate = 'http://tile.stamen.com/toner-lite/{z}/{x}/{y}.png',
+                       attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>,
+                       under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>.
+                       Data by <a href="http://openstreetmap.org">OpenStreetMap</a>,
+                       under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.') %>%
+  setView(lat = 44.963, lng = -93.22, zoom = 11) %>%
+  addPolygons(data = tract_cc, fillColor = ~pal(clust_coeff), fillOpacity = .7, weight = 1)
+```
+
+## Betweenness Centrality
+
+A path between two nodes of a graph is a sequence of edges connecting the two nodes. For example, in the graph above the sequence (f-h, h-g, g-a, a-b, b-c) describes a path between nodes f and c. The shortest path between any two nodes is the path containing the fewest number of edges. Both paths (f-h, h-b, b-c) and (f-e, e-d, d-c) are shortest paths between f and c because they both contain 3 edges, and there are NO paths between nodes f and c containing fewer than three edges.
+
+The Betweenness Centrality of a node measures how 'central' that node is to the graph. Specifically, the betweenness centrality of a node k is given by
+\[
+BC(k) = \sum_{(i,j) \in E} \delta_{i,j}(k)/\delta_{i,j},
+\]
+where $\delta_{i,j}$ is defined as the total number of shortest paths between nodes $i$ and $j$, and $\delta_{i,j}(k)$ is the number of shortest paths between nodes $i$ and $j$ that pass through node $k$. Intuitively, betweenness centrality assumes that a traveler on a graph will take the shortest path between any two points, and a higher betweenness centrality means more travelers pass through that node.
+
+The map below shows the relative betweeness centrality of census tracts when the OD data is considered as an undirected graph. Downtown 
+Minneapolis, downtown St. Paul, and the airport/Mall of America all have high betweenness centrality meaning many shortest paths pass through these census tracts. Considered as a directed graph, there are no significant differences.
+
+```{r}
+bet_tract <- betweenness(tract_graph, weight = NULL, directed = FALSE)
+bet_tract <- data.table(tract = names(bet_tract), BC = bet_tract)
+tracts <- merge(tracts, bet_tract, by.x = 'GEOID10', by.y = 'tract', all.y = TRUE)
+
+pal_tract <- colorNumeric(palette = "Reds", domain = tracts$BC)
+tract_BC_leaf <- leaflet() %>% addTiles(urlTemplate = 'http://tile.stamen.com/toner-lite/{z}/{x}/{y}.png',
+                            attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>,
+                            under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>.
+                            Data by <a href="http://openstreetmap.org">OpenStreetMap</a>,
+                            under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.') %>%
+  setView(lat = 44.963, lng = -93.22, zoom = 11) %>%
+  addPolygons(data = tracts, fillColor = ~pal_tract(BC), fillOpacity = .7, weight = 1)
+
+tract_BC_leaf
+```
+
+## Page Rank
+Page Rank was an algorithm originally proposed to filter websites for a search engine. A website has a higher Page Rank if a 'random clicker' is more likely to end up on that site. The same method can be applied to any graph. In the OD graph, we can think Page Rank as measuring destinations in the sense that a higher Page Rank means a traveler is more likely to end their trip in that census tract.
+
+In the graph below, it is evident that Minneapolis is the most likely trip destination. While St. Paul and the airport were strong hubs (many trips passing through the location), they were less strong centers (many trips ending at the location).
+
+```{r}
+pr_tract <- page_rank(tract_graph, vids = V(tract_graph), weights = edge_attr(tract_graph, name = 'weight', index = E(tract_graph)))
+pr_tract <- data.table(tract = names(pr_tract$vector), PR = pr_tract$vector)
+tracts <- merge(tracts, pr_tract, by.x = 'GEOID10', by.y = 'tract', all.y = TRUE)
+
+pal_tract_PR <- colorNumeric(palette = "Reds", domain = tracts$PR)
+tract_PR_leaf <- leaflet() %>% addTiles(urlTemplate = 'http://tile.stamen.com/toner-lite/{z}/{x}/{y}.png',
+                       attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>,
+                       under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>.
+                       Data by <a href="http://openstreetmap.org">OpenStreetMap</a>,
+                       under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.') %>%
+  setView(lat = 44.963, lng = -93.22, zoom = 11) %>%
+  addPolygons(data = tracts, fillColor = ~pal_tract_PR(PR), fillOpacity = .7, weight = 1)
+
+tract_PR_leaf
+```
+
+
+## Random Walk and Walktrap Clustering
+A random walk on a graph creates a path, where the next edge in the path is chosen randomly. Starting at node $i$, the probability that the random walker travels to node $j$ is proportional to the weight of edge $(i,j)$. For example if edge $(i,j)$ has weight $w_{ij} =1$ and edge $(i,k)$ has weight $w_{ik} = 2$, the random walk is more likely to choose edge $(i,j)$ as the next part of the path.
+
+The idea behind Walktrap Clustering is that short random walks (walks with few steps) will tend to stay within a strongly connected community. Note that since this is a random algorithm, you may get different clustering outputs each time you run this file.
+
+The map below shows clustering with a random walk of 6 steps. Two clusters are generated. Interestingly, the dividing line between the two clusters is either on or close to the boundary between the cities of Minneapolis and St. Paul, and suburbs close to St. Paul are generally member of the 'St. Paul cluster.' Interestingly, the University of Minnesota St. Paul campus is consistently classified in the 'Minneapolis cluster.' Also, a small tract immediately south of Bloomington and a small tract north of Mounds View are consistently classified into the 'St. Paul cluster.' We see similar clustering results with various different step sizes.
+
+```{r}
+tract_wt <- cluster_walktrap(tract_graph, steps = 6, weights = E(tract_graph)$weight)
+#tract_wt
+tract_wt_memb <- membership(tract_wt)
+tract_wt_memb <- data.table(tract = names(tract_wt_memb), clust = tract_wt_memb)
+tract_wt <- merge(tracts, tract_wt_memb, by.x = 'GEOID10', by.y = 'tract', all.x = TRUE)
+
+pal <- colorFactor(palette = "Paired", domain = tract_wt$clust)
+leaflet() %>% addTiles(urlTemplate = 'http://tile.stamen.com/toner-lite/{z}/{x}/{y}.png',
+                       attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>,
+                       under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>.
+                       Data by <a href="http://openstreetmap.org">OpenStreetMap</a>,
+                       under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.') %>%
+  setView(lat = 44.963, lng = -93.22, zoom = 9) %>%
+  addPolygons(data = tract_wt, fillColor = ~pal(clust), fillOpacity = .7, weight = 1)
+```
+
+Next, we run a shorter random walk, of length 3 to highlight some other community possibilities. Clustering with a random walk gives a similar structure, but the results are harder to visualize since it gives many clusters consisting of only two tracts, which are most likely not significant. This suggests we may want to look at 4 clusters: (these are just my names for them)
+
+1. Outer-ring
+2. Minneapolis + MPLS suburbs
+3. St. Paul + STP suburbs
+4. South St. Paul + immediately south of St. Paul
+```{r}
+tract_wt <- cluster_walktrap(tract_graph, steps = 3, weights = E(tract_graph)$weight)
+#tract_wt
+tract_wt_memb <- membership(tract_wt)
+tract_wt_memb <- data.table(tract = names(tract_wt_memb), clust = tract_wt_memb)
+tract_wt <- merge(tracts, tract_wt_memb, by.x = 'GEOID10', by.y = 'tract', all.x = TRUE)
+
+pal <- colorFactor(palette = "Dark2", domain = subset(tract_wt, clust <= 4)$clust)
+leaflet() %>% addTiles(urlTemplate = 'http://tile.stamen.com/toner-lite/{z}/{x}/{y}.png',
+                       attribution = 'Map tiles by <a href="http://stamen.com">Stamen Design</a>,
+                       under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>.
+                       Data by <a href="http://openstreetmap.org">OpenStreetMap</a>,
+                       under <a href="http://www.openstreetmap.org/copyright">ODbL</a>.') %>%
+  setView(lat = 44.963, lng = -93.22, zoom = 9) %>%
+  addPolygons(data = tract_wt, weight = 1) %>% addPolygons(data = subset(tract_wt, clust <= 4), fillColor = ~pal(clust), fillOpacity = .7, weight = 1)
+```
